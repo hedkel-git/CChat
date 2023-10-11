@@ -64,19 +64,32 @@ channelHandle(Ch = #channel{clients = Clients}, {join, Client}) ->
     end;
 
 
-channelHandle(Ch = #channel{clients = Clients}, {leave, Client}) ->
-    case lists:member(Client, Clients) of
+%channelHandle(Ch = #channel{clients = Clients}, {leave, Client}) ->
+%    case lists:member(Client, Clients) of
+%        true ->
+%            {reply, ok, removeClient(Ch, Client)};
+%        false ->
+%            {reply, {error, user_not_joined, "Cannot leave unassociated channel"}, Ch}
+%    end;
+
+channelHandle(Ch = #channel{clients = Clients}, {leave, Channel, Nick, Leaver}) ->
+    case lists:member(Leaver, Clients) of
         true ->
-            {reply, ok, removeClient(Ch, Client)};
+            spawn(fun() -> 
+                  sendMessageTo(Clients, Channel, Leaver, "From Channel", Nick ++ " has left the channel")
+                  end),
+
+            {reply, ok, removeClient(Ch, Leaver)};
         false ->
             {reply, {error, user_not_joined, "Cannot leave unassociated channel"}, Ch}
     end;
 
-
 channelHandle(Ch = #channel{nick = ChannelName, clients = Clients},{message_send, Client, Nick, Msg}) ->
     case lists:member(Client, Clients) of
         true ->
-            sendMessageTo(Clients, ChannelName, Client, Nick, Msg),
+            spawn(fun() -> 
+                  sendMessageTo(Clients, ChannelName, Client, Nick, Msg)
+                  end),
             {reply, ok, Ch};
         false ->
             {reply, {error, user_not_joined, "Cannot send message in unassociated channel"}, Ch}
@@ -90,14 +103,20 @@ channelHandle(Ch, Data) ->
 
 sendMessageTo([], _ChannelName, _Sender, _Nick, _Msg) -> ok;
 
-sendMessageTo([Client | Clients], ChannelName, Sender, Nick, Msg) when Client =/= Sender->
-    % requesting the client to 'show' the message
-    genserver:request(Client, {message_receive, ChannelName, Nick, Msg}),
-
+sendMessageTo([Client | Clients], ChannelName, Sender, Nick, Msg) when Client =:= Sender ->
+    % we do not display the message to the sender.
     sendMessageTo(Clients, ChannelName, Sender, Nick, Msg);
 
-
 sendMessageTo([Client | Clients], ChannelName, Sender, Nick, Msg) ->
+    % requesting the client to 'show' the
+    % message with the help of a new process
+
+%is this necessary??
+%    spawn(fun() ->
+%          genserver:request(Client,{message_receive, ChannelName, Nick, Msg})
+%          end),
+    genserver:request(Client,{message_receive, ChannelName, Nick, Msg}),
+
     sendMessageTo(Clients, ChannelName, Sender, Nick, Msg).
 
 
