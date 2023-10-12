@@ -30,13 +30,13 @@ initial_state(Nick, GUIAtom, ServerAtom) ->
 handle(St, {join, Channel}) ->
     % TODO: Implement this function
     % {reply, ok, St} ;
-    {reply, {error, not_implemented, "join not implemented"}, St} ;
+    {reply, ok , St} ;
 
 % Leave channel
 handle(St, {leave, Channel}) ->
     % TODO: Implement this function
     % {reply, ok, St} ;
-    {reply, {error, not_implemented, "leave not implemented"}, St} ;
+    {reply, ok, St} ;
 
 % Sending message (from GUI, to channel)
 handle(St, {message_send, Channel, Msg}) ->
