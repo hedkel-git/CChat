@@ -18,7 +18,6 @@ initial_state(Nick, GUIAtom, ServerAtom) ->
     % but this is not allowed and collides with some of the tests
     % catch(genserver:request(ServerAtom, {add_nickname, Nick})),
 
-
     #client_st{
         gui = GUIAtom,
         nick = Nick,
@@ -35,18 +34,18 @@ initial_state(Nick, GUIAtom, ServerAtom) ->
 
 % Join channel
 handle(St = #client_st{nick = Nick, server = Server}, {join, Channel}) ->
-    
+    % Checking if the server exists/online
     case whereis(Server) of
+        % If server not found, reply with an error 
         undefined ->
             {reply, {error, server_not_reached, "Server is occupied"}, St};
-
+    
         _Pid ->
-            % checking if the server is busy
+            % Try and catch timeout 
+            % Send a request to server for joining channel 
             try genserver:request(Server, {join, list_to_atom(Channel), self(), Nick}) of
                 Response ->
                     {reply, Response, St}
-                
-            % server is busy
             catch
                 timeout_error ->
                     {reply, {error, server_not_reached, "Server is occupied"}, St}
@@ -57,16 +56,18 @@ handle(St = #client_st{nick = Nick, server = Server}, {join, Channel}) ->
 % Leave channel
 handle(St = #client_st{nick = Nick, server = Server}, {leave, Channel}) ->
 
-
+    % Convert from channel's string to atom 
     ChannelAtom = list_to_atom(Channel),
+    % Check if channel exists 
     case whereis(ChannelAtom) of
-
+        % If channel does not exist, reply with an error 
         undefined ->
             {reply, {error, server_not_reached, "Channel does not exist"}, St};
 
-            _Pid ->
-                Response = genserver:request(ChannelAtom, {leave, Nick, self()}),
-                {reply, Response, St}
+        _Pid ->
+            % Send a request directly to channel for leaving the channel
+            Response = genserver:request(ChannelAtom, {leave, Nick, self()}),
+            {reply, Response, St}
     end;
 
 
@@ -74,11 +75,14 @@ handle(St = #client_st{nick = Nick, server = Server}, {leave, Channel}) ->
 handle(St = #client_st{nick = Nick, server = Server}, {message_send, Channel, Msg}) ->
 
     ChannelAtom = list_to_atom(Channel),
+    % Check if channel exists 
     case whereis(ChannelAtom) of
         undefined ->
+             % If channel does not exist, reply with an error 
             {reply, {error, server_not_reached, "Channel does not exist"}, St};
     
         _Pid ->
+            % Send a request directly to channel for sending message 
             Response = genserver:request(ChannelAtom, {message_send, self(), Nick, Msg}),
             {reply, Response, St}
     end;
@@ -87,6 +91,7 @@ handle(St = #client_st{nick = Nick, server = Server}, {message_send, Channel, Ms
 % This case is only relevant for the distinction assignment!
 % Change nick (no check, local only)
 handle(St = #client_st{nick = OldNick, server = Server}, {nick, NewNick}) ->
+    % Send a request to server for changing nick 
     case genserver:request(Server, {change_nick, OldNick, NewNick}) of
         ok ->
             {reply, ok, St#client_st{nick = NewNick}};
@@ -113,6 +118,7 @@ handle(St = #client_st{gui = GUI}, {message_receive, Channel, Nick, Msg}) ->
 % Quit client via GUI
 handle(St = #client_st{nick = Nick, server = Server}, quit) ->
     % Any cleanup should happen here, but this is optional
+    % Send a request to server for leaving all channels 
     {reply, genserver:request(Server, {leave_all_channels, Nick, self()}), St};
 
 
