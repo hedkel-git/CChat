@@ -12,6 +12,13 @@
 % Return an initial state record. This is called from GUI.
 % Do not change the signature of this function.
 initial_state(Nick, GUIAtom, ServerAtom) ->
+
+    % this would be needed if a client wanted to change their
+    % name before joining any channel... 
+    % but this is not allowed and collides with some of the tests
+    % catch(genserver:request(ServerAtom, {add_nickname, Nick})),
+
+
     #client_st{
         gui = GUIAtom,
         nick = Nick,
@@ -27,73 +34,65 @@ initial_state(Nick, GUIAtom, ServerAtom) ->
 %   - NewState is the updated state of the client
 
 % Join channel
-handle(St = #client_st{server = ServerAtom}, {join, Channel}) ->
-
-    % Converting Channel to an atom and
-    % checking if it has been created or not
-    ChannelAtom = list_to_atom(Channel),
-
-    case whereis(ChannelAtom) of
-        % If channel does not exist, we tell server
-        % to create it and add ourselves to it.
+handle(St = #client_st{nick = Nick, server = Server}, {join, Channel}) ->
+    
+    case whereis(Server) of
         undefined ->
-            
-            case whereis(ServerAtom) of
-                undefined ->
-                    {reply, {error, server_not_reached, "Server is offline"}, St};
+            {reply, {error, server_not_reached, "Server is occupied"}, St};
 
-                _Pid ->
-                    case catch(genserver:request(ServerAtom,
-                                {create_join, Channel, ChannelAtom, self()}) ) of
-                        
-                        timeout_error ->
-                            {reply, {error, server_not_reached, "Server is timed out"}, St};
-                        
-                        Result ->
-                            {reply, Result, St}
-                    end
-            end;
-
-        % If channel does exist, we request to join it directly.
         _Pid ->
-            Result = genserver:request(ChannelAtom, {join, self()}),
-            {reply, Result, St}
+            % checking if the server is busy
+            try genserver:request(Server, {join, list_to_atom(Channel), self(), Nick}) of
+                Response ->
+                    {reply, Response, St}
+                
+            % server is busy
+            catch
+                timeout_error ->
+                    {reply, {error, server_not_reached, "Server is occupied"}, St}
+            end
     end;
 
 
 % Leave channel
-handle(St = #client_st{nick = Nick}, {leave, Channel}) ->
+handle(St = #client_st{nick = Nick, server = Server}, {leave, Channel}) ->
+
 
     ChannelAtom = list_to_atom(Channel),
-
     case whereis(ChannelAtom) of
-        undefined ->
-            {reply, {error, user_not_joined, "Channel does not exist"}, St};
 
-        _Pid ->
-            {reply, genserver:request(ChannelAtom, {leave, Channel, Nick, self()}), St}
+        undefined ->
+            {reply, {error, server_not_reached, "Channel does not exist"}, St};
+
+            _Pid ->
+                Response = genserver:request(ChannelAtom, {leave, Nick, self()}),
+                {reply, Response, St}
     end;
 
 
-
 % Sending message (from GUI, to channel)
-handle(St = #client_st{nick = Nick}, {message_send, Channel, Msg}) ->
+handle(St = #client_st{nick = Nick, server = Server}, {message_send, Channel, Msg}) ->
 
     ChannelAtom = list_to_atom(Channel),
-
     case whereis(ChannelAtom) of
         undefined ->
-            {reply, {error, user_not_joined, "Channel does not exist"}, St};
+            {reply, {error, server_not_reached, "Channel does not exist"}, St};
+    
         _Pid ->
-            Result = genserver:request(ChannelAtom, {message_send, self(), Nick, Msg}),
-            {reply, Result, St}
+            Response = genserver:request(ChannelAtom, {message_send, self(), Nick, Msg}),
+            {reply, Response, St}
     end;
 
 
 % This case is only relevant for the distinction assignment!
 % Change nick (no check, local only)
-handle(St, {nick, NewNick}) ->
-    {reply, ok, St#client_st{nick = NewNick}} ;
+handle(St = #client_st{nick = OldNick, server = Server}, {nick, NewNick}) ->
+    case genserver:request(Server, {change_nick, OldNick, NewNick}) of
+        ok ->
+            {reply, ok, St#client_st{nick = NewNick}};
+        _else ->
+            {reply, {error, nick_taken, "Nickname is taken"}, St}
+    end;
 
 
 
@@ -108,17 +107,14 @@ handle(St, whoami) ->
 
 % Incoming message (from channel, to GUI)
 handle(St = #client_st{gui = GUI}, {message_receive, Channel, Nick, Msg}) ->
-    io:fwrite("message recieved~n"),
-    io:format("pid: ~p~n", [self()]),
-
-
     gen_server:call(GUI, {message_receive, Channel, Nick++"> "++Msg}),
     {reply, ok, St} ;
 
 % Quit client via GUI
-handle(St, quit) ->
+handle(St = #client_st{nick = Nick, server = Server}, quit) ->
     % Any cleanup should happen here, but this is optional
-    {reply, ok, St} ;
+    {reply, genserver:request(Server, {leave_all_channels, Nick, self()}), St};
+
 
 % Catch-all for any unhandled requests
 handle(St, Data) ->

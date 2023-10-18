@@ -8,50 +8,129 @@ start(ServerAtom) ->
     % - Spawn a new process which waits for a message, handles it, then loops infinitely
     % - Register this process to ServerAtom
     % - Return the process id
-    genserver:start(ServerAtom, [], fun server:serverHandle/2).
+
+    % Starting a server process registered to 'ServerAtom'.
+    genserver:start(ServerAtom, createServer(), fun server:serverHandle/2).
 
 
 % Stop the server process registered to the given name,
 % together with any other associated processes
 stop(ServerAtom) ->
 
+    % Stopping all channels
+    genserver:request(ServerAtom, {stop_all_channels}),
+
+    % Stopping server
     genserver:stop(ServerAtom).
 
 % ---------------------------------------------------------------------------
+% The structure of a server
+-record(server, {
+    clients,   % list of clients nicknames
+    channels   % list of channels
+    }).
 
-serverHandle(Server, {create_join, ChannelName, ChannelAtom, Client}) ->
+% Initial server-state
+createServer() -> #server{clients = [], channels = []}.
 
-    genserver:start(ChannelAtom, createChannel(ChannelName, Client), fun channelHandle/2),
-    {reply, ok, [ChannelAtom | Server]};
+% Adds a channel to the servers state.
+% Used when a new channel is created.
+addChannelToServer(Server = #server{channels = Channels}, ChannelAtom) ->
+    Server#server{channels = [ChannelAtom | Channels]}.
+
+% Adds a channel and a nickname to the servers state.
+% Used when a new channel is created.
+addChannelAndClient(Server = #server{channels = Channels, clients = Clients}, ChannelAtom, ClientName) ->
+    Server#server{clients  = [ClientName | Clients],
+                  channels = [ChannelAtom | Channels]}.
+
+% Adds a nickname to the servers state.
+% Used when a client joins an existing channel.
+addClientToServer(Server = #server{clients = Clients}, ClientName) ->
+    Server#server{clients = [ClientName | Clients]}.
+
+% Removes a nickname from the servers state.
+% Used when a client quits or when a client successfully changes nickname.
+removeClientFromServer(Server = #server{clients = Clients}, ClientName) ->
+    Server#server{clients = lists:filter(fun(Name) -> Name =/= ClientName end, Clients)}.
 
 
-serverHandle(Server, {leave_all_channels, Client}) ->
+% Join a channel
+serverHandle(Server = #server{clients = Clients}, {join, ChannelAtom, ClientPid, ClientName}) ->
+
+    % checking if channel exists
+    case whereis(ChannelAtom) of
+        % channel doesn't exist
+        undefined ->
+            % creating channel
+            genserver:start(ChannelAtom,
+                            createChannel(ChannelAtom, ClientPid),
+                            fun channelHandle/2),
+            
+                        %adding channel and client to servers state
+            {reply, ok, addChannelAndClient(Server, ChannelAtom, ClientName)};
+
+        % channel does exist
+        _Pid ->
+            % asking channel instead
+            Response = genserver:request(ChannelAtom, {join, ClientPid}),
+
+                              %adding client to servers state
+            {reply, Response, addClientToServer(Server, ClientName)}
+    end;
+
+
+% only exists to add clients' initial names to server, but is not needed.
+% serverHandle(Server, {add_nickname, Nickname}) ->
+%    {reply, ok, addClientToServer(Server, Nickname)};
+
+
+serverHandle(Server = #server{clients = Nicknames}, {change_nick, OldNick, NewNick}) ->
+    case lists:member(NewNick, Nicknames) of
+        true ->
+            {reply, {error, nick_taken, "Nickname is taken"}, Server};
+        false ->
+            NewServer = addClientToServer(removeClientFromServer(Server, OldNick), NewNick),
+            {reply, ok, NewServer}
+    end;
+
+
+% Server is stopped
+serverHandle(Server = #server{channels = Channels}, {stop_all_channels}) ->
+
+    %stopping all the channels
+    spawn(fun() -> [genserver:stop(Channel) || Channel <- Channels] end),
+   
     {reply, ok, Server};
 
 
-%leaveAllChannels([], {leave_all_channels, _Client}) ->
-%    ok;
-%leaveAllChannels([Channel | Channels], {leave_all_channels, Client}) ->
-%    genserver:request(Channel, {})
+% A client has quit
+serverHandle(Server = #server{channels = Channels}, {leave_all_channels, Nick, Client}) ->
+
+    spawn(fun() -> [genserver:request(Channel, {leave, Nick, Client}) || Channel <- Channels] end),
+
+    {reply, ok, removeClientFromServer(Server, Nick)};
 
 
-
+% Catch-all for any unhandled requests
 serverHandle(Server, Data) ->
     {reply, {error, not_implemented, "Server does not handle this command"}, Server}.
 
+
 % ---------------------------------------------------------------------------
 -record(channel, {
-    nick,       % name of the channel
+    nick,       % name of the channel, an atom
     clients     % list of the clients' PIDs
 }).
+
 
 createChannel(Nick, Client) ->
     #channel{nick = Nick, clients = [Client]}.
 
-addClient(Ch = #channel{clients = Clients}, Client) ->
+addClientToChannel(Ch = #channel{clients = Clients}, Client) ->
     Ch#channel{clients = [Client | Clients]}.
 
-removeClient(Ch = #channel{clients = Clients}, Client) ->
+removeClientFromChannel(Ch = #channel{clients = Clients}, Client) ->
     Ch#channel{clients = lists:delete(Client, Clients)}.
 
 
@@ -60,65 +139,57 @@ channelHandle(Ch = #channel{clients = Clients}, {join, Client}) ->
         true ->
             {reply, {error, user_already_joined, "Already joined"}, Ch};
         false ->
-            {reply, ok, addClient(Ch, Client)}
+            {reply, ok, addClientToChannel(Ch, Client)}
     end;
 
 
-%channelHandle(Ch = #channel{clients = Clients}, {leave, Client}) ->
-%    case lists:member(Client, Clients) of
-%        true ->
-%            {reply, ok, removeClient(Ch, Client)};
-%        false ->
-%            {reply, {error, user_not_joined, "Cannot leave unassociated channel"}, Ch}
-%    end;
-
-channelHandle(Ch = #channel{clients = Clients}, {leave, Channel, Nick, Leaver}) ->
-    case lists:member(Leaver, Clients) of
+channelHandle(Ch = #channel{nick = ChannelAtom, clients = Clients}, {leave, Nick, Leaving}) ->
+    case lists:member(Leaving, Clients) of
         true ->
             spawn(fun() -> 
-                  sendMessageTo(Clients, Channel, Leaver, "From Channel", Nick ++ " has left the channel")
+                  sendMessageTo(Clients, atom_to_list(ChannelAtom), Leaving,
+                        "From Channel", Nick ++ " has left the channel")
                   end),
 
-            {reply, ok, removeClient(Ch, Leaver)};
+            {reply, ok, removeClientFromChannel(Ch, Leaving)};
         false ->
             {reply, {error, user_not_joined, "Cannot leave unassociated channel"}, Ch}
     end;
 
-channelHandle(Ch = #channel{nick = ChannelName, clients = Clients},{message_send, Client, Nick, Msg}) ->
+
+
+channelHandle(Ch = #channel{nick = ChannelAtom, clients = Clients},
+              {message_send, Client, Nick, Msg}) ->
     case lists:member(Client, Clients) of
         true ->
-            spawn(fun() -> 
-                  sendMessageTo(Clients, ChannelName, Client, Nick, Msg)
+
+            spawn(fun() ->
+                  sendMessageTo(Clients, atom_to_list(ChannelAtom), Client, Nick, Msg)
                   end),
+            
             {reply, ok, Ch};
         false ->
             {reply, {error, user_not_joined, "Cannot send message in unassociated channel"}, Ch}
     end;
 
 
+% Catch-all for any unhandled requests
 channelHandle(Ch, Data) ->
     {reply, {error, not_implemented, "Channel does not handle this command"}, Ch}.
 
 
 
-sendMessageTo([], _ChannelName, _Sender, _Nick, _Msg) -> ok;
 
-sendMessageTo([Client | Clients], ChannelName, Sender, Nick, Msg) when Client =:= Sender ->
-    % we do not display the message to the sender.
-    sendMessageTo(Clients, ChannelName, Sender, Nick, Msg);
+% no clients to send message to
+sendMessageTo([], _Channel, _Sender, _Nick, _Msg) -> ok;
 
-sendMessageTo([Client | Clients], ChannelName, Sender, Nick, Msg) ->
-    % requesting the client to 'show' the
-    % message with the help of a new process
+% we do not display the message to the sender.
+sendMessageTo([Client | Clients], Channel, Sender, Nick, Msg) when Client =:= Sender ->
+    sendMessageTo(Clients, Channel, Sender, Nick, Msg);
 
-%is this necessary??
-%    spawn(fun() ->
-%          genserver:request(Client,{message_receive, ChannelName, Nick, Msg})
-%          end),
-    genserver:request(Client,{message_receive, ChannelName, Nick, Msg}),
-
-    sendMessageTo(Clients, ChannelName, Sender, Nick, Msg).
-
+sendMessageTo([Client | Clients], Channel, Sender, Nick, Msg) ->
+    genserver:request(Client,{message_receive, Channel, Nick, Msg}),
+    sendMessageTo(Clients, Channel, Sender, Nick, Msg).
 
 
 
